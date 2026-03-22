@@ -188,13 +188,28 @@ def get_radial_profile(T, E, Z,
 
 class Shower:
 
-    def __init__(self, E, material):
-        self.E = E
+    def __init__(self, material, E=None):
         self.Z = atomic_number[material] if isinstance(material, str) else material
         self.Ec = critical_energy[self.Z]
 
-        ### compute mean parameters
-        self.y = E/self.Ec
+        ### mean params and profiles
+        if E is not None:
+            self.compute_mean_profile(E)
+        else:
+            self.mean_params = None
+            self.mean_longitudinal_profile = None
+            self.mean_radial_profile = None
+
+        ### fluctuated params and profiles
+        self.fluc_params = None
+        self.fluc_longitudinal_profile = None
+        self.fluc_radial_profile = None
+
+    def compute_mean_profile(self, E=None):
+
+        if E is not None:
+            self.E = E
+            self.y = self.E/self.Ec
         self.mean_params = get_mean_params(self.y, self.Z)
 
         ### compute mean profile
@@ -207,12 +222,12 @@ class Shower:
                                             E=self.E, Z=self.Z,
                                             fluctuate=False)
 
-        ### fluctuated params and profiles
-        self.fluc_params = None
-        self.fluc_longitudinal_profile = None
-        self.fluc_radial_profile = None
 
-    def fluctuate_profile(self):
+    def fluctuate_profile(self, E=None):
+
+        if E is not None:
+            self.E = E
+            self.y = self.E/self.Ec
 
         self.fluc_params = get_fluc_params(self.y, self.Z)
         self.fluc_longitudinal_profile = get_longitudinal_profile(
