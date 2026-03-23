@@ -19,6 +19,19 @@ critical_energy = {
     13: 28.0
 }
 
+###########################
+#### Fitted Parameters ####
+###########################
+
+### LONGITUDINAL ###
+
+### Eq (2)
+def longitudinal_pdf(t, alpha, beta):
+    return gamma_dist.pdf(t, alpha, scale=1/beta)
+
+def longitudinal_cdf(t, alpha, beta):
+    return gamma_dist.cdf(t, alpha, scale=1/beta)
+
 ### Eq (4)
 def get_beta(alpha, T):
     return (alpha - 1) / T
@@ -36,34 +49,15 @@ def get_alpha(y, Z,
               a_3=2.38):
     return a_1 + (a_2 + a_3/Z) * np.log(y)
 
-### Eq (11b)
-def get_cholesky_covariance_matrix(sigma1, sigma2, rho12):
+### Putting it all together (longitudinal)
+def get_longitudinal_parameters(E, Z):
 
-    sigma_matrix = np.array([
-        [sigma1, 0],
-        [0, sigma2]
-    ])
+    y = E / critical_energy[Z]
 
-    rho_matrix = np.array([
-            [np.sqrt(1+rho12),  np.sqrt(1-rho12)],
-            [np.sqrt(1+rho12), -np.sqrt(1-rho12)]
-        ])/np.sqrt(2)
-
-    return sigma_matrix @ rho_matrix
-
-
-def get_mean_params(y, Z):
-    T = get_T(y)
-    alpha = get_alpha(y, Z)
-    beta = get_beta(alpha, T)
-
-    return {
-        'T': T,
-        'alpha': alpha,
-        'beta': beta
-    }
-
-def get_fluc_params(y, Z):
+    ### Mean longitudinal profile parameters (default args)
+    mean_T = get_T(y)
+    mean_alpha = get_alpha(y, Z)
+    mean_beta = get_beta(mean_alpha, mean_T)
 
     ### Eq (9)
     def get_sigma(y, s1, s2):
@@ -80,13 +74,18 @@ def get_fluc_params(y, Z):
     sigma_ln_alpha    = get_sigma(y, s1=-0.58, s2=0.86)
     rho_ln_T_ln_alpha = get_rho(y, r1=0.705, r2=-0.023)
 
-    cov_matrix = get_cholesky_covariance_matrix(sigma_ln_T, sigma_ln_alpha, rho_ln_T_ln_alpha)
-
     ### Two random variables
-    z = np.random.randn(2)
+    if isinstance(y, np.ndarray):
+        # z = np.random.randn(len(y), 2)
+        z1 = np.random.randn(len(y))
+        z2 = np.random.randn(len(y))
+    else:
+        # z = np.random.randn(2)
+        z1, z2 = np.random.randn(2)
 
-    ### Eq (11a)
-    ln_T_i, ln_alpha_i = np.array([mean_ln_T, mean_ln_alpha]) + cov_matrix @ z
+    ### Eq (11) expanded
+    ln_T_i     = mean_ln_T     + sigma_ln_T     * (np.sqrt(1+rho_ln_T_ln_alpha)*z1 + np.sqrt(1-rho_ln_T_ln_alpha)*z2)/np.sqrt(2)
+    ln_alpha_i = mean_ln_alpha + sigma_ln_alpha * (np.sqrt(1+rho_ln_T_ln_alpha)*z1 - np.sqrt(1-rho_ln_T_ln_alpha)*z2)/np.sqrt(2)
 
     ### Final parameters
     T_i = np.exp(ln_T_i)
@@ -94,6 +93,9 @@ def get_fluc_params(y, Z):
     beta_i = get_beta(alpha_i, T_i)
 
     return {
+        'mean_T': mean_T,
+        'mean_alpha': mean_alpha,
+        'mean_beta': mean_beta,
         'T': T_i,
         'alpha': alpha_i,
         'beta': beta_i,
@@ -105,15 +107,33 @@ def get_fluc_params(y, Z):
     }
 
 
-def get_longitudinal_profile(alpha, beta):
+### RADIAL ###
 
-    def pdf(t):
-        ### Eq (2)
-        return gamma_dist.pdf(t, alpha, scale=1/beta)
+def get_tau(t, T, alpha=None, mean_ln_alpha=None, fluctuate=True):
 
-    return pdf
+    if fluctuate:
+        assert alpha is not None and mean_ln_alpha is not None, \
+            "fluctuate requires alpha and mean_ln_alpha"
+        beta = get_beta(alpha, T)
+        mean_t = alpha / beta
+        ### Eq (34)
+        tau = (t / mean_t) * np.exp(mean_ln_alpha) / (np.exp(mean_ln_alpha) - 1)
+    else:
+        tau = t / T
 
+    return tau
 
+### Eq (23)
+def radial_component(r, R):
+    num = 2*r*R**2
+    den = (r**2 + R**2)**2
+    return num/den
+
+### Eq (23)
+def radial_pdf(r, p, R_core, R_tail):
+    core = radial_component(r, R_core)
+    tail = radial_component(r, R_tail)
+    return p*core + (1-p)*tail
 
 ### Eq (24)
 def get_R_core(tau, z_1, z_2):
@@ -129,13 +149,21 @@ def get_R_tail(tau, k_1, k_2, k_3, k_4):
 def get_p(tau, p_1, p_2, p_3):
     tau_prime = (p_2 - tau) / p_3
     p = p_1 * np.exp(tau_prime - np.exp(tau_prime))
-    if not 0 <= p <= 1:
-        raise ValueError(f"p should be in [0,1], got {p} for tau={tau}")
-    return p  
+    oob = False
+    if isinstance(tau, np.ndarray):
+        if (p<0).any() or (p>1).any():
+            oob = True
+    elif p < 0 or p > 1:
+        oob = True
+    if oob:
+        print("WARNING: p not in [0, 1]. Clamping...")
+        p = np.clip(p, 0, 1)
+    return p
 
-### A.1.3
-def get_radial_profile_params(tau, E, Z):
+### Putting it all together (radial)
+def get_radial_parameters(tau, E, Z):
 
+    ### A.1.3
     lnE = np.log(E)
     z_1 = 0.0251 + 0.00319*lnE
     z_2 = 0.1162 - 0.000381*Z
@@ -153,90 +181,106 @@ def get_radial_profile_params(tau, E, Z):
 
     return R_C, R_T, p
 
+### RADIAL SAMPLING ###
 
-def get_radial_profile(T, E, Z,
-                   fluctuate=True, 
-                   alpha=None,
-                   mean_ln_alpha=None):
+### Eq (28)
+def sample_radii(R_core, R_tail, p, N):
+    size = N
+    if isinstance(p, np.ndarray):
+        assert len(p) == len(R_core) == len(R_tail), \
+            "inputs must have same length"
+        size = p.shape
+        ### Expand dims to broadcast to (size, N)
+        R_core = R_core[:, None]
+        R_tail = R_tail[:, None]
+        p = p[:, None]
+    v = np.random.uniform(0, 1, size)
+    w = np.random.uniform(0, 1, size)
+    ### Note: there appears to be a typo in the paper (they do p < w)
+    R_mixed = np.where(w < p, R_core, R_tail)
+    return R_mixed * np.sqrt(v / (1 - v))
 
+### Eq (31)
+def get_num_spots_total(E, Z):
+    N = 93 * np.log(Z) * E ** 0.876
+    if isinstance(E, np.ndarray):
+        N = np.clip(N.astype(int), 1, None)
+    else:
+        N = max(1, int(N))
+    return N
+
+### Eq (32) and (33)
+def get_num_spots_layer(t_lo, t_hi, alpha, T, Z, N_total=None, E=None):
+
+    if N_total is None:
+        assert E is not None, "Either N_total or E must be provided"
+        N_total = get_num_spots_total(E, Z)
+
+    T_spot     = T     * (0.698 + 0.00212*Z)
+    alpha_spot = alpha * (0.639 + 0.00334*Z)
+    beta_spot  = get_beta(alpha_spot, T_spot)
     
-    def radial_component(r, R):
-        num = 2*r*R**2
-        den = (r**2 + R**2)**2
-        return num/den
+    ### Fraction of spots in this layer
+    frac = longitudinal_cdf(t_hi, alpha_spot, beta_spot) \
+         - longitudinal_cdf(t_lo, alpha_spot, beta_spot)
+    
+    if isinstance(alpha, np.ndarray):
+        N_layer = N_total * frac
+        N_layer = np.clip(N_layer.astype(int), 1, None)
+    else:
+        N_layer = max(1, int(N_total * frac))
 
-    def radial_profile(r, t):
-
-        if fluctuate:
-            assert alpha is not None and mean_ln_alpha is not None, \
-                "alpha and mean_ln_alpha needed to fluctuate"
-            beta = get_beta(alpha, T)
-            mean_t = alpha / beta
-            ### Eq (34)
-            tau = (t / mean_t) * np.exp(mean_ln_alpha) / (np.exp(mean_ln_alpha) - 1)
-        else:
-            tau = t / T
-
-        ### Get radial profile parameters
-        R_core, R_tail, p = get_radial_profile_params(tau, E, Z)
-
-        ### Eq (23)
-        return p*radial_component(r, R_core) + (1-p)*radial_component(r, R_tail)
-
-    return radial_profile
+    return N_layer
 
 
-class Shower:
+def shoot(E, Z, t_edges):
 
-    def __init__(self, material, E=None):
-        self.Z = atomic_number[material] if isinstance(material, str) else material
-        self.Ec = critical_energy[self.Z]
+    ### Check inputs
+    if isinstance(E, np.ndarray):
+        raise NotImplementedError("Vectorized shoot not implemented yet")
+    
+    assert len(t_edges) >= 2, "t_edges must have at least 2 edges"
+    assert np.all(np.diff(t_edges) > 0), "t_edges must be in ascending order"
 
-        ### mean params and profiles
-        if E is not None:
-            self.compute_mean_profile(E)
-        else:
-            self.mean_params = None
-            self.mean_longitudinal_profile = None
-            self.mean_radial_profile = None
+    ### Compute longitudinal parameters
+    long_params = get_longitudinal_parameters(E, Z)
 
-        ### fluctuated params and profiles
-        self.fluc_params = None
-        self.fluc_longitudinal_profile = None
-        self.fluc_radial_profile = None
+    ### Compute total number of spots
+    N_total = get_num_spots_total(E, Z)
 
-    def compute_mean_profile(self, E=None):
+    ### Container
+    results = {'E': [], 't': [], 'r': [], 'phi': []}
 
-        if E is not None:
-            self.E = E
-            self.y = self.E/self.Ec
-        self.mean_params = get_mean_params(self.y, self.Z)
+    ### Loop over layers
+    for l in range(len(t_edges) - 1):
 
-        ### compute mean profile
-        self.mean_longitudinal_profile = get_longitudinal_profile(
-                                            alpha=self.mean_params['alpha'], 
-                                            beta=self.mean_params['beta']
-                                        )
-        self.mean_radial_profile = get_radial_profile(
-                                            T=self.mean_params['T'],
-                                            E=self.E, Z=self.Z,
-                                            fluctuate=False)
+        t_lo = t_edges[l]
+        t_hi = t_edges[l+1]
+        t_mid = (t_lo + t_hi) / 2
 
+        ### Integrate longitudinal pdf --> energy in this layer
+        dE = E * (longitudinal_cdf(t_hi, long_params['alpha'], long_params['beta']) \
+                - longitudinal_cdf(t_lo, long_params['alpha'], long_params['beta']))
+        
+        ### Compute radial parameters
+        tau = get_tau(t_mid, long_params['T'], 
+                      alpha=long_params['alpha'], 
+                      mean_ln_alpha=long_params['mean_ln_alpha'])
+        R_core, R_tail, p = get_radial_parameters(tau, E, Z)
 
-    def fluctuate_profile(self, E=None):
+        ### Sample radii and angles
+        N_spots = get_num_spots_layer(t_lo, t_hi, 
+                                      long_params['alpha'], long_params['T'], 
+                                      Z, N_total=N_total)
+        spot_E = dE / N_spots
+        r = sample_radii(R_core, R_tail, p, N_spots)
+        phi = np.random.uniform(0, 2*np.pi, N_spots)
 
-        if E is not None:
-            self.E = E
-            self.y = self.E/self.Ec
+        results['E'].append(np.array([spot_E] * N_spots))
+        results['t'].append(np.array([t_mid] * N_spots))
+        results['r'].append(r)
+        results['phi'].append(phi)
 
-        self.fluc_params = get_fluc_params(self.y, self.Z)
-        self.fluc_longitudinal_profile = get_longitudinal_profile(
-                                            alpha=self.fluc_params['alpha'], 
-                                            beta=self.fluc_params['beta'])
+    results = {k: np.concatenate(v) for k, v in results.items()}    
 
-        self.fluc_radial_profile = get_radial_profile(
-                                        T=self.fluc_params['T'],
-                                        E=self.E, Z=self.Z,
-                                        fluctuate=True,
-                                        alpha=self.fluc_params['alpha'],
-                                        mean_ln_alpha=self.fluc_params['mean_ln_alpha'])
+    return results
