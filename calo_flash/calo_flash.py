@@ -189,11 +189,12 @@ def sample_radii(R_core, R_tail, p, N):
     if isinstance(p, np.ndarray):
         assert len(p) == len(R_core) == len(R_tail), \
             "inputs must have same length"
-        size = p.shape
         ### Expand dims to broadcast to (size, N)
-        R_core = R_core[:, None]
-        R_tail = R_tail[:, None]
-        p = p[:, None]
+        R_core = R_core[..., None]
+        R_tail = R_tail[..., None]
+        p = p[..., None]
+        size = list(p.shape)
+        size[-1] = N
     v = np.random.uniform(0, 1, size)
     w = np.random.uniform(0, 1, size)
     ### Note: there appears to be a typo in the paper (they do p < w)
@@ -284,3 +285,63 @@ def shoot(E, Z, t_edges):
     results = {k: np.concatenate(v) for k, v in results.items()}    
 
     return results
+
+
+def shoot_batch(Es, Z, t_edges, flatten=True, N_spots_per_layer=None):
+
+    assert len(t_edges) >= 2, "t_edges must have at least 2 edges"
+    assert np.all(np.diff(t_edges) > 0), "t_edges must be in ascending order"
+
+    N_layers = len(t_edges) - 1
+
+    ### Longitudinal parameters: each (N_particles,)
+    long_params = get_longitudinal_parameters(Es, Z)
+
+    t_lo  = t_edges[:-1]       # (N_layers,)
+    t_hi  = t_edges[1:]
+    t_mid = (t_lo + t_hi) / 2
+
+    ### Broadcast to (N_particles, 1)
+    alpha         = long_params['alpha'][:, None]
+    beta          = long_params['beta'][:, None]
+    T             = long_params['T'][:, None]
+    mean_ln_alpha = long_params['mean_ln_alpha'][:, None]
+
+    ### Energy per layer: (N_particles, N_layers)
+    dE = Es[:, None] * (longitudinal_cdf(t_hi, alpha, beta)
+                      - longitudinal_cdf(t_lo, alpha, beta))
+
+    ### Radial parameters: (N_particles, N_layers)
+    tau = get_tau(t_mid, T, alpha=alpha, mean_ln_alpha=mean_ln_alpha)
+    R_core, R_tail, p = get_radial_parameters(tau, Es[:, None], Z)
+
+    ### Fix spots per layer to allow vectorized ops
+    if N_spots_per_layer is None:
+        N_total = get_num_spots_total(Es, Z)
+        N_spots_per_layer = max(1, int(np.mean(N_total) / N_layers))
+        N_spots_per_layer = min(N_spots_per_layer, 100_000) # avoid OOM
+
+    ### Sample radii and angles: (N_particles, N_layers, N_spots_per_layer)
+    r   = sample_radii(R_core, R_tail, p, N_spots_per_layer)
+    phi = np.random.uniform(0, 2*np.pi, r.shape)
+
+    ### Additional information
+    spot_E = dE / N_spots_per_layer
+    spot_E_bc = np.broadcast_to(spot_E[:, :, None], r.shape)
+    t_mid_bc = np.broadcast_to(t_mid[None, :, None], r.shape)
+    particle_idx = np.arange(len(Es))
+    particle_idx_bc = np.broadcast_to(particle_idx[:, None, None], r.shape)
+
+    ### Results
+    out_dict = {
+        'E':   spot_E_bc,
+        't':   t_mid_bc,
+        'r':   r,
+        'phi': phi,
+        'particle_idx': particle_idx_bc
+    }
+
+    if flatten:
+        out_dict = {k: v.ravel() for k, v in out_dict.items()}
+
+    return out_dict

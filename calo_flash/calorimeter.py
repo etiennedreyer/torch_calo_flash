@@ -86,6 +86,50 @@ class CaloBlock:
         for i, (E, x, y) in enumerate(zip(particle_Es, particle_xs, particle_ys)):
             self.shower(E, particle_x=x, particle_y=y, particle_idx=i)
 
+    def simulate_batch(self, particle_Es, particle_xs=None, particle_ys=None, N_spots_per_layer=None):
+
+        N = len(particle_Es)
+        if particle_xs is None: particle_xs = np.zeros(N)
+        if particle_ys is None: particle_ys = np.zeros(N)
+
+        self.clear()
+        spots = calo_flash.shoot_batch(particle_Es, self.Z, self.cell_z_edges, N_spots_per_layer=N_spots_per_layer)
+
+        pidx = spots['particle_idx']
+        x = spots['r'] * np.cos(spots['phi']) + particle_xs[pidx]
+        y = spots['r'] * np.sin(spots['phi']) + particle_ys[pidx]
+        z = spots['t']
+        e = spots['E']
+
+        ### Single histogramdd call for all particles at once
+        mask = (x >= -self.width/2)  & (x < self.width/2) & \
+               (y >= -self.height/2) & (y < self.height/2) & \
+               (z >= 0)              & (z < self.depth)
+
+        self.cell_e, _ = np.histogramdd(
+            np.stack([x[mask], y[mask], z[mask]], axis=1),
+            bins=[self.cell_x_edges, self.cell_y_edges, self.cell_z_edges],
+            weights=e[mask]
+        )
+
+        ### Truth record
+        # Compute cell index for each spot as a single integer key
+        # instead of searchsorted, just compute directly from the flat histogram bins
+        ix = np.floor((x[mask] - self.cell_x_edges[0]) / self.cell_size_x).astype(int)
+        iy = np.floor((y[mask] - self.cell_y_edges[0]) / self.cell_size_y).astype(int)
+        iz = np.floor((z[mask] - self.cell_z_edges[0]) / self.cell_size_z).astype(int)
+
+        # Single integer cell key
+        cell_key = ix * (self.N_cells_y * self.N_cells_z) + iy * self.N_cells_z + iz
+
+        # Now group by (cell_key, particle_idx) and sum energies
+        src_dst = np.stack([cell_key, pidx[mask]], axis=1)  # (N_spots, 2)
+        keys, inverse = np.unique(src_dst, axis=0, return_inverse=True)
+        weights = np.bincount(inverse, weights=e[mask])
+
+        self.cell_particle_src = keys[:, 0].tolist()
+        self.cell_particle_dst = keys[:, 1].tolist()
+        self.cell_particle_wgt = weights.tolist()
 
 class EventGenerator:
 
