@@ -234,60 +234,11 @@ def get_num_spots_layer(t_lo, t_hi, alpha, T, Z, N_total=None, E=None):
     return N_layer
 
 
-def shoot(E, Z, t_edges):
+def shoot(Es, Z, t_edges, flatten=True, N_spots_per_layer=None):
 
-    ### Check inputs
-    if isinstance(E, np.ndarray):
-        raise NotImplementedError("Vectorized shoot not implemented yet")
-    
-    assert len(t_edges) >= 2, "t_edges must have at least 2 edges"
-    assert np.all(np.diff(t_edges) > 0), "t_edges must be in ascending order"
-
-    ### Compute longitudinal parameters
-    long_params = get_longitudinal_parameters(E, Z)
-
-    ### Compute total number of spots
-    N_total = get_num_spots_total(E, Z)
-
-    ### Container
-    results = {'E': [], 't': [], 'r': [], 'phi': []}
-
-    ### Loop over layers
-    for l in range(len(t_edges) - 1):
-
-        t_lo = t_edges[l]
-        t_hi = t_edges[l+1]
-        t_mid = (t_lo + t_hi) / 2
-
-        ### Integrate longitudinal pdf --> energy in this layer
-        dE = E * (longitudinal_cdf(t_hi, long_params['alpha'], long_params['beta']) \
-                - longitudinal_cdf(t_lo, long_params['alpha'], long_params['beta']))
-        
-        ### Compute radial parameters
-        tau = get_tau(t_mid, long_params['T'], 
-                      alpha=long_params['alpha'], 
-                      mean_ln_alpha=long_params['mean_ln_alpha'])
-        R_core, R_tail, p = get_radial_parameters(tau, E, Z)
-
-        ### Sample radii and angles
-        N_spots = get_num_spots_layer(t_lo, t_hi, 
-                                      long_params['alpha'], long_params['T'], 
-                                      Z, N_total=N_total)
-        spot_E = dE / N_spots
-        r = sample_radii(R_core, R_tail, p, N_spots)
-        phi = np.random.uniform(0, 2*np.pi, N_spots)
-
-        results['E'].append(np.array([spot_E] * N_spots))
-        results['t'].append(np.array([t_mid] * N_spots))
-        results['r'].append(r)
-        results['phi'].append(phi)
-
-    results = {k: np.concatenate(v) for k, v in results.items()}    
-
-    return results
-
-
-def shoot_batch(Es, Z, t_edges, flatten=True, N_spots_per_layer=None):
+    ### Flexible input handling
+    if isinstance(Es, float) or isinstance(Es, int):
+        Es = np.array([Es])
 
     assert len(t_edges) >= 2, "t_edges must have at least 2 edges"
     assert np.all(np.diff(t_edges) > 0), "t_edges must be in ascending order"
