@@ -251,7 +251,7 @@ def shoot(Es: torch.Tensor, Z: int, t_edges: torch.Tensor, N_spots_per_layer=Non
     ### Additional information
     spot_E          = (dE / N_spots_per_layer)[:, :, None].expand_as(r)
     t_mid_bc        = t_mid[None, :, None].expand_as(r)
-    particle_idx_bc = torch.arange(len(Es), device=Es.device)[:, None, None].expand_as(r)
+    particle_idx_bc = torch.arange(len(Es), device=Es.device, dtype=torch.long)[:, None, None].expand_as(r)
 
     ### Results
     out_dict = {

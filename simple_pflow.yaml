@@ -5,7 +5,7 @@ calorimeter:
   N_cells_x: 64           # Transverse cells in x (also sets N_cells_y)
   N_cells_z: 8            # Longitudinal layers
   N_spots_per_layer: 1000 # Number spots to sample
-  e_threshold: 25.0       # Cell energy threshold [MeV]
+  cell_e_threshold: 25.0       # Cell energy threshold [MeV]
 
 generator:
   x_range: [-4.0, 4.0]    # 80% of half-width [X0]
@@ -15,38 +15,38 @@ generator:
   power: 2.0              # Power-law index for energy spectrum
 
 transforms:
-  cell_E:
+  hit_E:
     type: log
     norm: 1000.0
     shift: 1.0
     offset: 1.0e-3
-  cell_x:
+  hit_x:
     type: minmax_sym
     min: -5.0
     max: 5.0
-  cell_y:
+  hit_y:
     type: minmax_sym
     min: -5.0
     max: 5.0
-  cell_z:
+  hit_z:
     type: minmax
     min: 0.0
     max: 16.0
-  cell_e:
+  hit_e:
     type: log
     norm: 1.0
-    shift: 1.0
+    shift: 0.0
     offset: 0.0
-  particle_E:
+  part_e:
     type: log
-    norm: 1000.0
-    shift: 1.0
-    offset: 1.0e-3
-  particle_x:
-    type: standard
-    mean: 0.0
-    std: 1.0
-  particle_y:
-    type: standard
-    mean: 0.0
-    std: 1.0
+    norm: 1.0
+    shift: 0.0
+    offset: 0.0
+  part_x:
+    type: minmax_sym
+    min: -5.0
+    max: 5.0
+  part_y:
+    type: minmax_sym
+    min: -5.0
+    max: 5.0

@@ -40,7 +40,7 @@ def unflatten(flat: torch.Tensor, idx_0: torch.Tensor,
 
         ### Create index for dim=1
         cumsum = counts.cumsum(dim=0) # (B,)
-        offsets = torch.cat((idx_0.new_zeros(1), cumsum[:-1])) # (B,)
+        offsets = cumsum - counts
         idx_1 = torch.arange(len(flat), device=d) - offsets[idx_0] # (N,)
 
     ### Compute max length for padding

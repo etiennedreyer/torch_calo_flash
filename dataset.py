@@ -22,14 +22,20 @@ class SimplePflowDataset(IterableDataset):
         self.batch_size = batch_size
         self.device = device if device is not None else torch.device('cpu')
 
-    def incidence_matrix(self, output, N_particles):
+    def incidence_matrix(self, output, N_particles, N_hits=None):
         evt_idx = output['truth_event_idx']
-        c_p_src = output['truth_cell_particle_src']
-        c_p_dst = output['truth_cell_particle_dst']
-        c_p_wgt = output['truth_cell_particle_e']
+        c_p_src = output['truth_hit_idx']
+        c_p_dst = output['truth_particle_idx']
+        c_p_wgt = output['truth_e']
 
-        N_cells = c_p_src.max().item() + 1
-        energy_im = torch.zeros((self.batch_size, N_particles, N_cells),
+        N_hits_batch = c_p_src.max().item() + 1
+        if N_hits is None:
+            N_hits = N_hits_batch
+        else:
+            assert N_hits >= N_hits_batch, \
+                f"N_hits in batch ({N_hits_batch}) > N_hits argument ({N_hits})"
+
+        energy_im = torch.zeros((self.batch_size, N_particles, N_hits),
                                  dtype=torch.float32, device=c_p_src.device)
 
         energy_im[evt_idx, c_p_dst, c_p_src] = c_p_wgt
@@ -50,18 +56,18 @@ class SimplePflowDataset(IterableDataset):
             p_E, p_x, p_y = generator.generate(self.batch_size)
             output = calorimeter.simulate(p_E, p_x, p_y,
                                           return_grid=False, 
-                                          return_point_cloud=True, 
+                                          return_hits=True, 
                                           return_truth=True)
 
             ### Features            
             input_feats = {k: v for k, v in output.items() \
-                          if k in ['cell_x', 'cell_y', 'cell_z', 'cell_e']}
+                          if k in ['hit_x', 'hit_y', 'hit_z', 'hit_e']}
 
             target_mask = p_E == 0
             target_feats = {
-                'particle_E': p_E,
-                'particle_x': p_x,
-                'particle_y': p_y
+                'part_e': p_E,
+                'part_x': p_x,
+                'part_y': p_y
             }
 
             ### NaN-pad target features
@@ -69,19 +75,20 @@ class SimplePflowDataset(IterableDataset):
                 v[target_mask] = float('nan')
 
             ### Transform features
-            input_feats = {k: transform(v, k, self.xform_cfg) for k, v in input_feats.items()}
+            input_feats  = {k: transform(v, k, self.xform_cfg) for k, v in input_feats.items()}
             target_feats = {k: transform(v, k, self.xform_cfg) for k, v in target_feats.items()}
 
             if self.batch_size > 1:
                 ### Unflatten input into padded tensors
-                idx_0 = output['event_idx']
+                idx_0 = output['hit_event_idx']
                 idx_1 = None
                 for k, v in input_feats.items():
                     input_feats[k], idx_1 = unflatten(v, idx_0, idx_1)
 
             ### Incidence matrix
-            N_particles = p_E.shape[0] if p_E.dim() == 1 else p_E.shape[1]
-            target_feats['incidence_matrix'] = self.incidence_matrix(output, N_particles)
+            N_particles = p_E.shape[1]
+            N_hits = input_feats['hit_x'].shape[1]
+            target_feats['incidence_matrix'] = self.incidence_matrix(output, N_particles, N_hits)
 
             yield input_feats, target_feats
             

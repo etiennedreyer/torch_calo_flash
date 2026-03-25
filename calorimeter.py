@@ -15,7 +15,7 @@ class CaloBlock:
         self.N_cells_z = config['N_cells_z']
         self.N_cells = self.N_cells_x * self.N_cells_y * self.N_cells_z
         self.N_spots_per_layer = config.get('N_spots_per_layer', 1000)
-        self.e_threshold = config.get('e_threshold', 0.0)
+        self.cell_e_threshold = config.get('cell_e_threshold', 0.0)
 
         self.get_device(device)
         self.initialize_cells()
@@ -40,7 +40,28 @@ class CaloBlock:
         self.cell_z_edges = torch.linspace(0, self.depth, self.N_cells_z + 1, device=self.device)
 
     def simulate(self, particle_Es: torch.Tensor, particle_xs: torch.Tensor, particle_ys: torch.Tensor,
-                 return_grid=True, return_point_cloud=True, return_truth=True, N_spots_per_layer=None):
+                 return_grid=True, return_hits=True, return_truth=True, N_spots_per_layer=None):
+
+        '''
+        Six separate sets are involved, each with a different number of elements:
+            - events (event)       : separate simulations each containing multiple particles. Serves as the batch dimension.
+            - particles (part)     : padded to a fixed maximum (N_particles) across the batch, with E=0 for padding entries
+            - spots (spot)         : sampled energy deposits from calo_flash, set by N_spots_per_layer
+            - cells (cell)         : the physical volume segments of the calorimeter, whether empty or filled
+            - hits (hit)           : subset of cells that have nonzero energy deposits after thresholding
+            - truth record (truth) : (src, dst, wgt) triplets connecting hits to parent particles
+
+        Batch computations are done using flattened tensors, for example:
+            - input particle properties:  (N_events * N_particles,)
+            - simulated cell energies:    (N_events * N_cells,)
+            - truth cell-particle record: (N_events * N_cells * N_particles,)
+
+        Indices are labeled as follows:
+            - "global" indexes the entire flattened batch
+            - "local"  indexes within each event
+        '''
+        if N_spots_per_layer is None:
+            N_spots_per_layer = self.N_spots_per_layer
 
         ### Auto-unsqueeze (N_particles,) -> (1, N_particles)
         squeezed = particle_Es.dim() == 1
@@ -64,110 +85,143 @@ class CaloBlock:
         flat_ys = particle_ys.reshape(-1)
 
         ### Mask out padded (E == 0) particles
-        valid_mask    = flat_Es > 0
-        valid_Es      = flat_Es[valid_mask]
-        orig_flat_idx = valid_mask.nonzero(as_tuple=True)[0]  # indices into flat_Es
+        nonzero_part_idx = torch.where(flat_Es > 0)[0]
 
         ### Calo Flash simulation (only valid particles)
-        if N_spots_per_layer is None:
-            N_spots_per_layer = self.N_spots_per_layer
-        spots = shoot(valid_Es, self.Z, self.cell_z_edges, N_spots_per_layer=N_spots_per_layer)
+        ### output values have shape (len(nonzero_part_idx) * N_cells_z * N_spots_per_layer,)
+        spot_dict = shoot(flat_Es[nonzero_part_idx], self.Z, 
+                      self.cell_z_edges, N_spots_per_layer=N_spots_per_layer)
 
-        ### Map spot particle index -> flat global index -> (event, local particle)
-        local_pidx   = spots['particle_idx'].long()
-        flat_pidx    = orig_flat_idx[local_pidx]          # index into flat_Es
-        event_idx    = flat_pidx // N_particles
-        particle_idx = flat_pidx  % N_particles
+        ### Map part idx on nonzero particles back to global part idx
+        spot_global_part_idx  = nonzero_part_idx[spot_dict['particle_idx']]
+        spot_event_idx        = spot_global_part_idx // N_particles
+        spot_local_part_idx   = spot_global_part_idx  % N_particles
 
         ### Convert to Cartesian
-        x = spots['r'] * torch.cos(spots['phi']) + flat_xs[flat_pidx]
-        y = spots['r'] * torch.sin(spots['phi']) + flat_ys[flat_pidx]
-        z = spots['t']
-        e = spots['E']
+        spot_x = spot_dict['r'] * torch.cos(spot_dict['phi']) + flat_xs[spot_global_part_idx]
+        spot_y = spot_dict['r'] * torch.sin(spot_dict['phi']) + flat_ys[spot_global_part_idx]
+        spot_z = spot_dict['t']
+        spot_e = spot_dict['E']
 
         ### Discard out-of-bounds spots
-        mask = (x >= -self.width/2)  & (x < self.width/2) & \
-               (y >= -self.height/2) & (y < self.height/2) & \
-               (z >= 0)              & (z < self.depth)
-        x_m, y_m, z_m, e_m = x[mask], y[mask], z[mask], e[mask]
-        event_m, particle_m = event_idx[mask], particle_idx[mask]
+        mask = (spot_x >= -self.width/2)  & (spot_x < self.width/2) & \
+               (spot_y >= -self.height/2) & (spot_y < self.height/2) & \
+               (spot_z >= 0)              & (spot_z < self.depth)
+        spot_x, spot_y, spot_z, spot_e = spot_x[mask], spot_y[mask], spot_z[mask], spot_e[mask]
+        spot_event_idx, spot_local_part_idx = spot_event_idx[mask], spot_local_part_idx[mask]
 
-        ### Cell indices (floor-division on uniform grid)
-        ix = ((x_m - self.cell_x_edges[0]) / self.cell_size_x).long().clamp(0, self.N_cells_x - 1)
-        iy = ((y_m - self.cell_y_edges[0]) / self.cell_size_y).long().clamp(0, self.N_cells_y - 1)
-        iz = ((z_m - self.cell_z_edges[0]) / self.cell_size_z).long().clamp(0, self.N_cells_z - 1)
-        cell_idx = ix * (self.N_cells_y * self.N_cells_z) + iy * self.N_cells_z + iz
+        ### Find the local cell index on (x,y,z) axes where the spot falls (floor-division on uniform grid)
+        spot_local_cell_idx_x = ((spot_x - self.cell_x_edges[0]) / self.cell_size_x).long().clamp(0, self.N_cells_x - 1)
+        spot_local_cell_idx_y = ((spot_y - self.cell_y_edges[0]) / self.cell_size_y).long().clamp(0, self.N_cells_y - 1)
+        spot_local_cell_idx_z = ((spot_z - self.cell_z_edges[0]) / self.cell_size_z).long().clamp(0, self.N_cells_z - 1)
 
-        ### Global index in (N_events x N_cells) flattened tensor
-        global_cell_idx = event_m * self.N_cells + cell_idx
+        ### Combine these to get a single local cell index running over all N_cells in each event
+        spot_local_cell_idx = spot_local_cell_idx_x * (self.N_cells_y * self.N_cells_z) \
+                            + spot_local_cell_idx_y * self.N_cells_z \
+                            + spot_local_cell_idx_z
 
-        ### Aggregate energy into (N_events, N_cells)
-        flat_cell_e = torch.zeros(N_events * self.N_cells, device=self.device)
-        flat_cell_e.scatter_add_(0, global_cell_idx, e_m)
+        ### Now map to a global cell index running over the entire batch (N_events * N_cells)
+        spot_global_cell_idx = spot_event_idx * self.N_cells + spot_local_cell_idx
+
+        ### Aggregate energy into flat (N_events * N_cells) array
+        cell_e = torch.zeros(N_events * self.N_cells, device=self.device)
+        cell_e.scatter_add_(0, spot_global_cell_idx, spot_e)
+
+        ### Add noise
+        ### (TODO)
 
         ### Zero out cells below detection threshold
-        if self.e_threshold > 0:
-            flat_cell_e[flat_cell_e < self.e_threshold] = 0.0
+        if self.cell_e_threshold > 0:
+            cell_e[cell_e < self.cell_e_threshold] = 0.0
+
+        ### Hit (active cell) global index running over (N_events * N_cells)
+        hit_global_cell_idx = torch.where(cell_e > 0)[0]
+
+        ### Inverse of above (-1 if inactive/thresholded)
+        cell_global_hit_idx = torch.full((N_events * self.N_cells,), -1, dtype=torch.long, device=self.device)
+        cell_global_hit_idx[hit_global_cell_idx] = torch.arange(len(hit_global_cell_idx), device=self.device)
 
         grid_dict = {}
         if return_grid:
-            ### Arrange energy deposits into grid (events, cells_x, cells_y, cells_z)
-            grid_e = flat_cell_e.reshape(N_events, self.N_cells_x, self.N_cells_y, self.N_cells_z)
+            ### Arrange energy deposits into grid (unflatten)
+            grid_e = cell_e.reshape(N_events, self.N_cells_x, self.N_cells_y, self.N_cells_z)
 
             ### remove event dimension if input was squeezed
             if squeezed: grid_e = grid_e[0]
 
-            grid_dict['grid_e'] = grid_e
+            grid_dict['cell_e'] = grid_e
 
-        point_dict = {}
-        if return_point_cloud:
+        hit_dict = {}
+        if return_hits:
 
             ### Extract points with E>0
-            point_flat_idx  = flat_cell_e.nonzero(as_tuple=True)[0]
-            point_event_idx = point_flat_idx // self.N_cells
-            point_glob_idx  = point_flat_idx  % self.N_cells
+            hit_event_idx      = hit_global_cell_idx // self.N_cells
+            hit_local_cell_idx = hit_global_cell_idx  % self.N_cells
 
-            ### Convert global cell index -> local cell index
-            point_ix =  point_glob_idx // (self.N_cells_y * self.N_cells_z)
-            point_iy = (point_glob_idx  % (self.N_cells_y * self.N_cells_z)) // self.N_cells_z
-            point_iz =  point_glob_idx  %  self.N_cells_z
+            ### TODO: can the mapping of index -> xyz be precomputed?
+            ### Convert local cell index -> local cell index on (x,y,z) axes
+            hit_local_cell_idx_x =  hit_local_cell_idx // (self.N_cells_y * self.N_cells_z)
+            hit_local_cell_idx_y = (hit_local_cell_idx  % (self.N_cells_y * self.N_cells_z)) // self.N_cells_z
+            hit_local_cell_idx_z =  hit_local_cell_idx  %  self.N_cells_z
 
             ### Compute corresponding cell centers
-            point_x = self.cell_x_edges[0] + (point_ix + 0.5) * self.cell_size_x
-            point_y = self.cell_y_edges[0] + (point_iy + 0.5) * self.cell_size_y
-            point_z = self.cell_z_edges[0] + (point_iz + 0.5) * self.cell_size_z
-            point_e = flat_cell_e[point_flat_idx]
+            hit_x = self.cell_x_edges[0] + (hit_local_cell_idx_x + 0.5) * self.cell_size_x
+            hit_y = self.cell_y_edges[0] + (hit_local_cell_idx_y + 0.5) * self.cell_size_y
+            hit_z = self.cell_z_edges[0] + (hit_local_cell_idx_z + 0.5) * self.cell_size_z
+            hit_e = cell_e[hit_global_cell_idx]
 
-            point_dict = {
-                'event_idx': point_event_idx,
-                'cell_x': point_x,
-                'cell_y': point_y,
-                'cell_z': point_z,
-                'cell_e': point_e
+            hit_dict = {
+                'hit_event_idx': hit_event_idx,
+                'hit_cell_idx': hit_local_cell_idx,
+                'hit_x': hit_x,
+                'hit_y': hit_y,
+                'hit_z': hit_z,
+                'hit_e': hit_e
             }
 
         truth_dict = {}
         if return_truth:
 
-            ### Truth record: unique key for (event, cell, particle)
-            combined_idx = global_cell_idx * N_particles + particle_m
-            wgt_dense = torch.zeros(N_events * self.N_cells * N_particles, device=self.device)
-            wgt_dense.scatter_add_(0, combined_idx, e_m)
-            nonzero = wgt_dense.nonzero(as_tuple=True)[0]
+            ### Compute index which tells which truth (particle, cell) pair to associate with each spot
+            spot_global_truth_idx = spot_global_cell_idx * N_particles + spot_local_part_idx
 
-            ### Invert combined index
-            event_idx         = (nonzero // N_particles) // self.N_cells
-            cell_particle_src = (nonzero // N_particles)  % self.N_cells
-            cell_particle_dst =  nonzero                  % N_particles
-            cell_particle_wgt = wgt_dense[nonzero]
+            ### Aggregate spots into flat (N_events * N_cells * N_particles) array of truth energy
+            truth_e = torch.zeros(N_events * self.N_cells * N_particles, device=self.device)
+            truth_e.scatter_add_(0, spot_global_truth_idx, spot_e)
+            truth_global_idx = truth_e.nonzero(as_tuple=True)[0]
+
+            ### Compute local (event, cell, particle) indices corresponding to each nonzero truth entry
+            truth_event_idx       = (truth_global_idx // N_particles) // self.N_cells
+            truth_local_cell_idx  = (truth_global_idx // N_particles)  % self.N_cells
+            truth_local_part_idx  =  truth_global_idx                  % N_particles
+            truth_e               = truth_e[truth_global_idx]
+
+            ### Compute global hit index for each truth entry
+            truth_global_cell_idx = truth_event_idx * self.N_cells + truth_local_cell_idx
+            truth_global_hit_idx = cell_global_hit_idx[truth_global_cell_idx]
+
+            ### Compute local hit index by subtracting offsets
+            hits_per_event = torch.bincount(hit_global_cell_idx // self.N_cells, minlength=N_events)
+            hit_event_offset = hits_per_event.cumsum(0) - hits_per_event
+            truth_local_hit_idx = truth_global_hit_idx - hit_event_offset[truth_event_idx]
+
+            if self.cell_e_threshold > 0:
+                ### Drop entries if E>0 but hit failed threshold
+                truth_hit_is_valid   = truth_global_hit_idx >= 0
+                truth_event_idx      = truth_event_idx[truth_hit_is_valid]
+                truth_local_cell_idx = truth_local_cell_idx[truth_hit_is_valid]
+                truth_local_hit_idx  = truth_local_hit_idx[truth_hit_is_valid]
+                truth_local_part_idx = truth_local_part_idx[truth_hit_is_valid]
+                truth_e              = truth_e[truth_hit_is_valid]
 
             truth_dict = {
-                'truth_event_idx':         event_idx,
-                'truth_cell_particle_src': cell_particle_src,
-                'truth_cell_particle_dst': cell_particle_dst,
-                'truth_cell_particle_e':   cell_particle_wgt
+                'truth_event_idx':    truth_event_idx,
+                'truth_cell_idx':     truth_local_cell_idx,
+                'truth_hit_idx':      truth_local_hit_idx,
+                'truth_particle_idx': truth_local_part_idx,
+                'truth_e':            truth_e
             }
 
         return {**grid_dict, 
-                **point_dict, 
+                **hit_dict, 
                 **truth_dict}
