@@ -43,7 +43,8 @@ class CaloBlock:
                  return_grid=True, return_point_cloud=True, return_truth=True, N_spots_per_layer=None):
 
         ### Auto-unsqueeze (N_particles,) -> (1, N_particles)
-        if particle_Es.dim() == 1:
+        squeezed = particle_Es.dim() == 1
+        if squeezed:
             particle_Es = particle_Es.unsqueeze(0)
             particle_xs = particle_xs.unsqueeze(0)
             particle_ys = particle_ys.unsqueeze(0)
@@ -113,35 +114,36 @@ class CaloBlock:
             ### Arrange energy deposits into grid (events, cells_x, cells_y, cells_z)
             grid_e = flat_cell_e.reshape(N_events, self.N_cells_x, self.N_cells_y, self.N_cells_z)
 
-            ### remove event dimension for single-event case
-            if N_events == 1: grid_e = grid_e[0]
+            ### remove event dimension if input was squeezed
+            if squeezed: grid_e = grid_e[0]
 
             grid_dict['grid_e'] = grid_e
 
         point_dict = {}
         if return_point_cloud:
 
-            active_cell_idx = flat_cell_e.nonzero(as_tuple=True)[0]
-            hit_event = active_cell_idx // self.N_cells
-            hit_cell  = active_cell_idx  % self.N_cells
+            ### Extract points with E>0
+            point_flat_idx  = flat_cell_e.nonzero(as_tuple=True)[0]
+            point_event_idx = point_flat_idx // self.N_cells
+            point_glob_idx  = point_flat_idx  % self.N_cells
 
-            ### Convert global -> local cell index
-            hit_ix =  hit_cell // (self.N_cells_y * self.N_cells_z)
-            hit_iy = (hit_cell  % (self.N_cells_y * self.N_cells_z)) // self.N_cells_z
-            hit_iz =  hit_cell  %  self.N_cells_z
+            ### Convert global cell index -> local cell index
+            point_ix =  point_glob_idx // (self.N_cells_y * self.N_cells_z)
+            point_iy = (point_glob_idx  % (self.N_cells_y * self.N_cells_z)) // self.N_cells_z
+            point_iz =  point_glob_idx  %  self.N_cells_z
 
             ### Compute corresponding cell centers
-            hit_x = self.cell_x_edges[0] + (hit_ix + 0.5) * self.cell_size_x
-            hit_y = self.cell_y_edges[0] + (hit_iy + 0.5) * self.cell_size_y
-            hit_z = self.cell_z_edges[0] + (hit_iz + 0.5) * self.cell_size_z
-            hit_e = flat_cell_e[active_cell_idx]
+            point_x = self.cell_x_edges[0] + (point_ix + 0.5) * self.cell_size_x
+            point_y = self.cell_y_edges[0] + (point_iy + 0.5) * self.cell_size_y
+            point_z = self.cell_z_edges[0] + (point_iz + 0.5) * self.cell_size_z
+            point_e = flat_cell_e[point_flat_idx]
 
             point_dict = {
-                'event_idx': hit_event,
-                'cell_x': hit_x,
-                'cell_y': hit_y,
-                'cell_z': hit_z,
-                'cell_e': hit_e
+                'event_idx': point_event_idx,
+                'cell_x': point_x,
+                'cell_y': point_y,
+                'cell_z': point_z,
+                'cell_e': point_e
             }
 
         truth_dict = {}
