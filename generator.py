@@ -7,6 +7,7 @@ class EventGenerator:
         self.y_min, self.y_max = config['y_range']
         self.E_min, self.E_max = config['E_range']
         self.N_min, self.N_max = config['N_range']
+        self.power = config.get('power', 2.0)
 
     def generate(self, N_events=1):
 
@@ -19,9 +20,8 @@ class EventGenerator:
         particle_ys = torch.rand((N_events, N_pad)) * (self.y_max - self.y_min) + self.y_min
 
         ### Power-law spectrum in energy
-        alpha = 2.0
         r = torch.rand((N_events, N_pad))
-        particle_Es = ((self.E_max**(1-alpha) - self.E_min**(1-alpha)) * r + self.E_min**(1-alpha))**(1/(1-alpha))
+        particle_Es = ((self.E_max**(1-self.power) - self.E_min**(1-self.power)) * r + self.E_min**(1-self.power))**(1/(1-self.power))
 
         if N_events == 1:
             return particle_Es[0], particle_xs[0], particle_ys[0]

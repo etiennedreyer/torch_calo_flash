@@ -1,13 +1,52 @@
 calorimeter:
-  Z: 82               # Atomic number (lead)
-  width: 10.0         # Transverse width [X0] (also sets height)
-  depth: 10.0         # Longitudinal depth [X0]
-  N_cells_x: 64       # Transverse cells in x (also sets N_cells_y)
-  N_cells_z: 8        # Longitudinal layers
-  N_spots_per_layer: 1000
+  Z: 82                   # Atomic number (lead)
+  width: 10.0             # Transverse width [X0] (also sets height)
+  depth: 16.0             # Longitudinal depth [X0]
+  N_cells_x: 64           # Transverse cells in x (also sets N_cells_y)
+  N_cells_z: 8            # Longitudinal layers
+  N_spots_per_layer: 1000 # Number spots to sample
+  e_threshold: 25.0       # Cell energy threshold [MeV]
 
 generator:
-  x_range: [-4.0, 4.0]   # 80% of half-width [X0]
+  x_range: [-4.0, 4.0]    # 80% of half-width [X0]
   y_range: [-4.0, 4.0]
   E_range: [1000, 100000] # Particle energy [MeV]
-  N_range: [1, 32]        # Number of particles per event
+  N_range: [4, 32]        # Number of particles per event
+  power: 2.0              # Power-law index for energy spectrum
+
+transforms:
+  cell_E:
+    type: log
+    norm: 1000.0
+    shift: 1.0
+    offset: 1.0e-3
+  cell_x:
+    type: minmax_sym
+    min: -5.0
+    max: 5.0
+  cell_y:
+    type: minmax_sym
+    min: -5.0
+    max: 5.0
+  cell_z:
+    type: minmax
+    min: 0.0
+    max: 16.0
+  cell_e:
+    type: log
+    norm: 1.0
+    shift: 1.0
+    offset: 0.0
+  particle_E:
+    type: log
+    norm: 1000.0
+    shift: 1.0
+    offset: 1.0e-3
+  particle_x:
+    type: standard
+    mean: 0.0
+    std: 1.0
+  particle_y:
+    type: standard
+    mean: 0.0
+    std: 1.0
