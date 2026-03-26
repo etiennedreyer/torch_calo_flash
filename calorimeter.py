@@ -70,9 +70,8 @@ class CaloBlock:
             particle_xs = particle_xs.unsqueeze(0)
             particle_ys = particle_ys.unsqueeze(0)
 
-        ### Shapes
+        ### Shapes (Note: N_particles = maximum across batch)
         N_events, N_particles = particle_Es.shape
-        self.max_particles = N_particles
 
         ### Move to device
         particle_Es = particle_Es.to(device=self.device, dtype=torch.float32)
@@ -134,13 +133,6 @@ class CaloBlock:
         if self.cell_e_threshold > 0:
             cell_e[cell_e < self.cell_e_threshold] = 0.0
 
-        ### Hit (active cell) global index running over (N_events * N_cells)
-        hit_global_cell_idx = torch.where(cell_e > 0)[0]
-
-        ### Inverse of above (-1 if inactive/thresholded)
-        cell_global_hit_idx = torch.full((N_events * self.N_cells,), -1, dtype=torch.long, device=self.device)
-        cell_global_hit_idx[hit_global_cell_idx] = torch.arange(len(hit_global_cell_idx), device=self.device)
-
         grid_dict = {}
         if return_grid:
             ### Arrange energy deposits into grid (unflatten)
@@ -151,11 +143,26 @@ class CaloBlock:
 
             grid_dict['cell_e'] = grid_e
 
+        ### Fast return
+        if not return_hits and not return_truth:
+            return grid_dict
+
+        ### Hit (active cell) global index running over (N_events * N_cells)
+        hit_global_cell_idx = torch.where(cell_e > 0)[0]
+
+        ### Tally hits per event
+        hit_event_idx  = hit_global_cell_idx // self.N_cells
+        event_num_hits = torch.bincount(hit_event_idx, minlength=N_events)
+        event_hit_offset = event_num_hits.cumsum(0) - event_num_hits
+
         hit_dict = {}
         if return_hits:
 
-            ### Extract points with E>0
-            hit_event_idx      = hit_global_cell_idx // self.N_cells
+            ### Hit local index within each event
+            hit_global_idx   = torch.arange(len(hit_global_cell_idx), device=self.device)
+            hit_local_idx    = hit_global_idx - event_hit_offset[hit_event_idx]
+
+            ### Hit local cell index
             hit_local_cell_idx = hit_global_cell_idx  % self.N_cells
 
             ### TODO: can the mapping of index -> xyz be precomputed?
@@ -172,6 +179,7 @@ class CaloBlock:
 
             hit_dict = {
                 'hit_event_idx': hit_event_idx,
+                'hit_idx': hit_local_idx,
                 'hit_cell_idx': hit_local_cell_idx,
                 'hit_x': hit_x,
                 'hit_y': hit_y,
@@ -196,14 +204,16 @@ class CaloBlock:
             truth_local_part_idx  =  truth_global_idx                  % N_particles
             truth_e               = truth_e[truth_global_idx]
 
+            ### Compute global hit index for each cell (-1 if inactive/thresholded)
+            cell_global_hit_idx = torch.full((N_events * self.N_cells,), -1, dtype=torch.long, device=self.device)
+            cell_global_hit_idx[hit_global_cell_idx] = torch.arange(len(hit_global_cell_idx), device=self.device)
+
             ### Compute global hit index for each truth entry
             truth_global_cell_idx = truth_event_idx * self.N_cells + truth_local_cell_idx
             truth_global_hit_idx = cell_global_hit_idx[truth_global_cell_idx]
 
-            ### Compute local hit index by subtracting offsets
-            hits_per_event = torch.bincount(hit_global_cell_idx // self.N_cells, minlength=N_events)
-            hit_event_offset = hits_per_event.cumsum(0) - hits_per_event
-            truth_local_hit_idx = truth_global_hit_idx - hit_event_offset[truth_event_idx]
+            ### Compute local hit index for each truth entry by subtracting offsets
+            truth_local_hit_idx = truth_global_hit_idx - event_hit_offset[truth_event_idx]
 
             if self.cell_e_threshold > 0:
                 ### Drop entries if E>0 but hit failed threshold
